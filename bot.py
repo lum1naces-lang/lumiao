@@ -3,7 +3,8 @@ import time
 import random
 import asyncio
 import logging
-from telegram import Update, ChatAction
+from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 
 # Настройка логирования
@@ -310,9 +311,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error("⚠️ Подожду 60 секунд перед перезапуском...")
         await asyncio.sleep(60)
 
-# ===================== ЗАПУСК БОТА БЕЗ КОНФЛИКТОВ =====================
+# ===================== ЗАПУСК БОТА =====================
 def main():
-    """Запуск бота с защитой от конфликтов"""
+    """Запуск бота"""
     import telegram
     import telegram.error
     
@@ -340,29 +341,18 @@ def main():
         print("⚠️ ВНИМАНИЕ: ID 7416252489 нужно заменить на свой реальный ID!")
     
     print("=" * 60)
-    print("⏳ Ожидаю 5 секунд перед запуском...")
-    time.sleep(5)
+    print("⏳ Ожидаю 3 секунды перед запуском...")
+    time.sleep(3)
     
-    # Основной цикл с обработкой конфликтов
+    # Основной цикл
     restart_count = 0
-    max_restarts = 10
+    max_restarts = 5
     
     while restart_count < max_restarts:
         try:
             print(f"\n🚀 Попытка запуска #{restart_count + 1}")
             
-            # Очищаем возможные предыдущие соединения
-            try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.stop()
-                    print("⏹️ Остановлен предыдущий event loop")
-            except:
-                pass
-            
             # Создаём новое приложение
-            print("🔄 Создаю новое приложение...")
             app = Application.builder().token(TELEGRAM_TOKEN).build()
             
             # Регистрируем обработчик ошибок
@@ -391,15 +381,12 @@ def main():
             print("📱 Отправь /start боту в Telegram")
             print("=" * 60)
             
-            # Запускаем бота с настройками для избежания конфликтов
+            # Запускаем бота
             app.run_polling(
                 drop_pending_updates=True,
                 close_loop=False,
-                skip_updates=True,
                 pool_timeout=20,
-                connect_timeout=30,
-                read_timeout=30,
-                write_timeout=30
+                connect_timeout=30
             )
             
         except telegram.error.Conflict as e:
@@ -409,20 +396,13 @@ def main():
             restart_count += 1
             time.sleep(30)
             
-        except telegram.error.TimedOut:
-            print("\n⚠️ Таймаут подключения")
-            print("🔄 Перезапуск через 10 секунд...")
+        except Exception as e:
+            print(f"\n💥 Ошибка: {type(e).__name__}: {e}")
+            print(f"🔄 Перезапуск через 10 секунд...")
             restart_count += 1
             time.sleep(10)
-            
-        except Exception as e:
-            print(f"\n💥 Неизвестная ошибка: {type(e).__name__}: {e}")
-            print(f"🔄 Перезапуск через 15 секунд...")
-            restart_count += 1
-            time.sleep(15)
     
     print(f"\n❌ Достигнут лимит перезапусков ({max_restarts})")
-    print("🚫 Бот остановлен. Проверь настройки и перезапусти вручную.")
     print("=" * 60)
 
 if __name__ == "__main__":
