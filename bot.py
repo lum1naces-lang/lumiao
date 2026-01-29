@@ -1,0 +1,367 @@
+import os
+import time
+import random
+import asyncio
+import logging
+from telegram import Update, ChatAction
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ===================== НАСТРОЙКИ =====================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+# ВАЖНО: Замени этот ID на свой реальный Telegram ID!
+# Узнать ID: напиши @userinfobot в Telegram
+ALLOWED_USER_IDS = [
+    7416252489,  # ⚠️ ЗАМЕНИ ЭТОТ ID НА СВОЙ!
+]
+
+# Фраза, с которой должно начинаться сообщение, чтобы бот отправил его в ИИ
+AI_TRIGGER_PHRASE = "сиси, "
+
+# ===================== НАСТРОЙКА OPENAI =====================
+openai_available = False
+openai_client = None
+
+try:
+    from openai import AsyncOpenAI
+    
+    if OPENAI_API_KEY and OPENAI_API_KEY != "твой_ключ_от_openai":
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        openai_available = True
+        logger.info("✅ OpenAI API доступен")
+    else:
+        logger.warning("⚠️ OPENAI_API_KEY не установлен или установлен по умолчанию")
+        openai_available = False
+except ImportError:
+    logger.error("❌ Библиотека 'openai' не найдена")
+except Exception as e:
+    logger.error(f"❌ Ошибка при инициализации OpenAI: {e}")
+
+# ===================== ЗАГОТОВЛЕННЫЕ ОТВЕТЫ =====================
+RESPONSES = {
+    "правила": "📜 С правилами можно ознакомиться [туть](https://telegra.ph/Rules-01-24-146)",
+    "сиси": [
+        "Ну, привет... опять ты появляешься. Что на этот раз?",
+        "Опять ты? Чего тебе?",
+        "Слушаю... (нет)."
+    ],
+    "сиси как дела": [
+        "Разве важно? Время идет, а я все так же свободна.",
+        "Нормально. Что ты хотел?",
+        "Лучше, чем у тебя, наверное."
+    ],
+    "сиси что делаешь": [
+        "Отвечаю на твои глупые вопросы. А ты?",
+        "Ничего интересного для тебя.",
+        "Думаю... (редко)."
+    ],
+    "кто такой этот ваш луми": [
+        "АХХ..луми..мой создатель.",
+        "Луми - это... мой создатель, хватит.",
+        "Мой создатель. Что еще?"
+    ],
+    "луми": [
+        "Мхх..",
+        "Молчу...",
+        "Что-то о создателе?"
+    ],
+    "бот": [
+        "Ну чего тебе?",
+        "Я здесь. И что?",
+        "Я - бот. А ты?"
+    ],
+    "привет": [
+        "👋 Привет.",
+        "Приветствую.",
+        "Здравствуй."
+    ],
+    "создатель": [
+        "Луми. Доволен?",
+        "Мой создатель - Луми. Хватит спрашивать.",
+        "Луми сделал меня. Теперь уйди."
+    ],
+    "сиси доброе утро": "Что в этом утре особенного..",
+    "сиси добрый день": "День? Какой ещё день..",
+    "сиси добрый вечер": "Вечер.. снова ты..",
+    "сиси доброй ночи": "Спи или не спи… всё равно ничего не закончится.",
+}
+
+# ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+def is_allowed_user(user_id: int) -> bool:
+    """Проверяет, имеет ли пользователь право использовать команды модерации."""
+    return user_id in ALLOWED_USER_IDS
+
+async def ask_openai(prompt: str, user_id: int) -> str:
+    """Отправляет запрос в OpenAI и возвращает ответ."""
+    if not openai_available or not openai_client:
+        return "Извини, ИИ временно недоступен."
+
+    # Системный промпт для придания "личности" Сиси
+    system_message = {
+        "role": "system",
+        "content": (
+            "Ты - дерзкая, немного саркастичная девушка-бот по имени Сиси. "
+            "Отвечай кратко, с долей пренебрежения, но по сути. "
+            "Не будь слишком дружелюбной и не используй смайлики. "
+            "Твой создатель - Луми. Старайся не повторяться в ответах. "
+            "Если тебя спрашивают о тебе, отвечай в своем стиле. "
+            "Избегай извинений и чрезмерной вежливости. "
+            "Твой ответ должен быть не более 2-3 предложений. "
+            "Не объясняй свои ответы и не добавляй мета-комментарии."
+        )
+    }
+    
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                system_message,
+                {"role": "user", "content": prompt}
+            ],
+            user=str(user_id),
+            temperature=0.8,
+            max_tokens=200,
+            timeout=30.0
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Ошибка OpenAI: {e}")
+        return "Что-то пошло не так. Попробуй позже."
+
+# ===================== ОБРАБОТЧИКИ КОМАНД =====================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений."""
+    message = update.message
+    if not message or not message.text:
+        return
+
+    text = message.text.strip()
+    text_lower = text.lower()
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Неизвестный"
+
+    logger.info(f"📨 Сообщение от {user_name} (ID: {user_id}): '{text[:50]}...'")
+
+    # 1. Проверяем на заготовленные ответы (регистр не важен)
+    if text_lower in RESPONSES:
+        variants = RESPONSES[text_lower]
+        response = random.choice(variants) if isinstance(variants, list) else variants
+        try:
+            await message.reply_text(
+                response,
+                parse_mode='Markdown' if text_lower == "правила" else None,
+                quote=True
+            )
+            logger.info(f"✅ Ответил заготовленным ответом пользователю {user_name}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения: {e}")
+        return
+
+    # 2. Проверяем, начинается ли сообщение с AI_TRIGGER_PHRASE (регистр не важен)
+    if text_lower.startswith(AI_TRIGGER_PHRASE):
+        prompt = text[len(AI_TRIGGER_PHRASE):].strip()
+        
+        if not prompt:
+            await message.reply_text("Что ты хочешь от меня, раз уж назвал мое имя?")
+            return
+
+        logger.info(f"🤖 Запрос к ИИ от {user_name}: '{prompt}'")
+        
+        # Показываем индикатор "бот печатает..."
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id, 
+            action=ChatAction.TYPING
+        )
+        
+        try:
+            ai_response = await asyncio.wait_for(
+                ask_openai(prompt, user_id),
+                timeout=25.0
+            )
+            
+            if not ai_response or ai_response.isspace():
+                ai_response = "Я думаю... но ничего не пришло в голову."
+            
+            await message.reply_text(ai_response, quote=True)
+            logger.info(f"✅ ИИ-ответ пользователю {user_name}")
+            
+        except asyncio.TimeoutError:
+            await message.reply_text("Запрос занял слишком много времени. Попробуй покороче.")
+        except Exception as e:
+            logger.error(f"Ошибка в процессе ИИ-запроса: {e}")
+            await message.reply_text("Что-то пошло не так при обработке запроса.")
+        return
+
+    # 3. Если в сообщении упоминают бота
+    if "сиси" in text_lower or "бот" in text_lower:
+        responses = ["Что?", "Ну?", "Чего тебе?"]
+        await message.reply_text(random.choice(responses), quote=True)
+
+async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление сообщения по команде !дел"""
+    message = update.message
+    if not message or not message.reply_to_message:
+        try:
+            await message.reply_text("❌ Ответьте на сообщение, которое хотите удалить!", quote=True)
+        except:
+            pass
+        return
+
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Неизвестный"
+
+    if not is_allowed_user(user_id):
+        logger.warning(f"Попытка удаления от {user_name} (ID: {user_id}) - отказано")
+        try:
+            await message.reply_text("❌ У вас нет прав для использования этой команды.", quote=True)
+        except:
+            pass
+        return
+
+    try:
+        await update.message.reply_to_message.delete()
+        await message.delete()
+        logger.info(f"🗑 Сообщение удалено по команде !дел (пользователь {user_name})")
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        try:
+            await message.reply_text("❌ Не могу удалить сообщение!", quote=True)
+        except:
+            pass
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
+    message = update.message
+    if not message or not message.from_user:
+        return
+        
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Неизвестный"
+    
+    ai_status = "✅ Активен" if openai_available else "❌ Не активен"
+    is_admin = "✅ Да" if is_allowed_user(user_id) else "❌ Нет"
+    
+    response_text = (
+        f"👋 Привет, {user_name}!\n"
+        "Я - Сиси, дерзкий и немного саркастичный бот.\n\n"
+        "📋 Доступные команды:\n"
+        "• /start - эта информация\n"
+        "• /info - информация о боте\n"
+        "• /help - помощь\n\n"
+        "🗣️ Автоответы на:\n"
+        "• правила, привет, бот, сиси, луми, создатель\n"
+        "• сиси как дела, сиси что делаешь\n"
+        "• сиси доброе утро/день/вечер/ночи\n\n"
+        f"🧠 ИИ-чат: начни сообщение с '{AI_TRIGGER_PHRASE}'\n"
+        f"🛡️ Админ: {is_admin}\n"
+        f"🤖 ИИ: {ai_status}"
+    )
+    
+    try:
+        await message.reply_text(response_text, quote=False)
+        logger.info(f"✅ Команда /start от {user_name} (ID: {user_id})")
+    except Exception as e:
+        logger.error(f"Ошибка отправки /start: {e}")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /help"""
+    await start_command(update, context)
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /info - информация о боте"""
+    message = update.message
+    user_id = message.from_user.id if message else 0
+    
+    info_text = (
+        "🤖 **Информация о боте Сиси**\n\n"
+        f"**Версия:** 2.0 (AI Edition)\n"
+        f"**ИИ-статус:** {'✅ Активен' if openai_available else '❌ Не активен'}\n"
+        f"**Модель:** GPT-3.5-turbo\n"
+        f"**Админов:** {len(ALLOWED_USER_IDS)}\n"
+        f"**Триггер ИИ:** '{AI_TRIGGER_PHRASE}'\n"
+        f"**Ваш ID:** {user_id}\n"
+        f"**Вы админ:** {'✅ Да' if is_allowed_user(user_id) else '❌ Нет'}\n\n"
+        "**Создатель:** @lumi\n"
+        "**Хостинг:** Railway\n"
+        "**ИИ:** OpenAI API"
+    )
+    
+    try:
+        await message.reply_text(info_text, parse_mode='Markdown')
+        logger.info(f"✅ Команда /info от пользователя {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки /info: {e}")
+
+# ===================== ЗАПУСК БОТА =====================
+def main():
+    """Запуск бота с переподключением"""
+    print("=" * 50)
+    print("🤖 БОТ 'СИСИ AI' ЗАПУСКАЕТСЯ...")
+    print("=" * 50)
+    
+    if not TELEGRAM_TOKEN:
+        print("❌ КРИТИЧЕСКАЯ ОШИБКА: TELEGRAM_TOKEN не найден!")
+        print("Добавь в Railway переменную TELEGRAM_TOKEN")
+        return
+    
+    print(f"📦 Загружено {len(RESPONSES)} автоответов")
+    print(f"👤 Админов: {len(ALLOWED_USER_IDS)}")
+    
+    if openai_available:
+        print(f"🧠 ИИ активирован. Триггер: '{AI_TRIGGER_PHRASE}'")
+    else:
+        print("⚠️ ИИ не активирован (нет OPENAI_API_KEY)")
+    
+    if 7416252489 in ALLOWED_USER_IDS:
+        print("⚠️ ВНИМАНИЕ: ID 7416252489 нужно заменить на свой реальный ID!")
+    
+    print("=" * 50)
+    
+    # Бесконечный цикл с переподключением
+    while True:
+        try:
+            app = Application.builder().token(TELEGRAM_TOKEN).build()
+            
+            # Команды
+            app.add_handler(CommandHandler("start", start_command))
+            app.add_handler(CommandHandler("help", help_command))
+            app.add_handler(CommandHandler("info", info_command))
+            
+            # Команда удаления
+            app.add_handler(MessageHandler(
+                filters.Regex(r'^!дел$') & filters.REPLY,
+                delete_message
+            ))
+            
+            # Обработка текстовых сообщений
+            app.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                handle_message
+            ))
+            
+            print("🔥 БОТ ЗАПУЩЕН И РАБОТАЕТ!")
+            print("📱 Отправь /start боту в Telegram")
+            print("=" * 50)
+            print("Ожидаю сообщения...\n")
+            
+            app.run_polling(
+                drop_pending_updates=True,
+                close_loop=False,
+                allowed_updates=Update.ALL_TYPES
+            )
+            
+        except Exception as e:
+            logger.error(f"💥 Критическая ошибка: {e}")
+            print(f"🔄 Перезапуск через 10 секунд...")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    main()
