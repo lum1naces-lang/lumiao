@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # ===================== НАСТРОЙКИ =====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")  # Ключ от DeepSeek
 
 # ВАЖНО: Замени этот ID на свой реальный Telegram ID!
 ALLOWED_USER_IDS = [
@@ -26,24 +26,28 @@ ALLOWED_USER_IDS = [
 # Фраза, с которой должно начинаться сообщение, чтобы бот отправил его в ИИ
 AI_TRIGGER_PHRASE = "сиси, "
 
-# ===================== НАСТРОЙКА OPENAI =====================
-openai_available = False
-openai_client = None
+# ===================== НАСТРОЙКА DEEPSEEK API =====================
+deepseek_available = False
+deepseek_client = None
 
 try:
     from openai import AsyncOpenAI
     
-    if OPENAI_API_KEY and OPENAI_API_KEY != "твой_ключ_от_openai":
-        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        openai_available = True
-        logger.info("✅ OpenAI API доступен")
+    if DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "твой_ключ_от_deepseek":
+        # Настраиваем клиент для DeepSeek API
+        deepseek_client = AsyncOpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url="https://api.deepseek.com"
+        )
+        deepseek_available = True
+        logger.info("✅ DeepSeek API доступен")
     else:
-        logger.warning("⚠️ OPENAI_API_KEY не установлен или установлен по умолчанию")
-        openai_available = False
+        logger.warning("⚠️ DEEPSEEK_API_KEY не установлен или установлен по умолчанию")
+        deepseek_available = False
 except ImportError:
     logger.error("❌ Библиотека 'openai' не найдена")
 except Exception as e:
-    logger.error(f"❌ Ошибка при инициализации OpenAI: {e}")
+    logger.error(f"❌ Ошибка при инициализации DeepSeek: {e}")
 
 # ===================== ЗАГОТОВЛЕННЫЕ ОТВЕТЫ =====================
 RESPONSES = {
@@ -99,9 +103,9 @@ def is_allowed_user(user_id: int) -> bool:
     """Проверяет, имеет ли пользователь право использовать команды модерации."""
     return user_id in ALLOWED_USER_IDS
 
-async def ask_openai(prompt: str, user_id: int) -> str:
-    """Отправляет запрос в OpenAI и возвращает ответ."""
-    if not openai_available or not openai_client:
+async def ask_deepseek(prompt: str, user_id: int) -> str:
+    """Отправляет запрос в DeepSeek API и возвращает ответ."""
+    if not deepseek_available or not deepseek_client:
         return "Извини, ИИ временно недоступен."
 
     # Системный промпт для придания "личности" Сиси
@@ -109,31 +113,41 @@ async def ask_openai(prompt: str, user_id: int) -> str:
         "role": "system",
         "content": (
             "Ты - дерзкая, немного саркастичная девушка-бот по имени Сиси. "
+            "Ты общаешься на русском языке с русскоязычными пользователями. "
             "Отвечай кратко, с долей пренебрежения, но по сути. "
             "Не будь слишком дружелюбной и не используй смайлики. "
             "Твой создатель - Луми. Старайся не повторяться в ответах. "
             "Если тебя спрашивают о тебе, отвечай в своем стиле. "
             "Избегай извинений и чрезмерной вежливости. "
             "Твой ответ должен быть не более 2-3 предложений. "
-            "Не объясняй свои ответы и не добавляй мета-комментарии."
+            "Не объясняй свои ответы и не добавляй мета-комментарии. "
+            "Отвечай только на русском языке."
         )
     }
     
     try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+        response = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",  # Модель DeepSeek Chat
             messages=[
                 system_message,
                 {"role": "user", "content": prompt}
             ],
-            user=str(user_id),
-            temperature=0.8,
-            max_tokens=200,
+            max_tokens=500,
+            temperature=0.7,
+            stream=False,
             timeout=30.0
         )
-        return response.choices[0].message.content.strip()
+        
+        answer = response.choices[0].message.content.strip()
+        
+        # Очищаем ответ от возможных технических пояснений
+        if "Как ИИ" in answer or "я ИИ" in answer.lower() or "я AI" in answer.lower():
+            answer = "Неважно кто я. Что ты хотел?"
+        
+        return answer
+        
     except Exception as e:
-        logger.error(f"Ошибка OpenAI: {e}")
+        logger.error(f"Ошибка DeepSeek: {e}")
         return "Что-то пошло не так. Попробуй позже."
 
 # ===================== ОБРАБОТЧИКИ КОМАНД =====================
@@ -173,7 +187,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("Что ты хочешь от меня, раз уж назвал мое имя?")
             return
 
-        logger.info(f"🤖 Запрос к ИИ от {user_name}: '{prompt}'")
+        logger.info(f"🤖 Запрос к DeepSeek от {user_name}: '{prompt}'")
         
         # Показываем индикатор "бот печатает..."
         await context.bot.send_chat_action(
@@ -183,15 +197,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             ai_response = await asyncio.wait_for(
-                ask_openai(prompt, user_id),
-                timeout=25.0
+                ask_deepseek(prompt, user_id),
+                timeout=30.0
             )
             
             if not ai_response or ai_response.isspace():
                 ai_response = "Я думаю... но ничего не пришло в голову."
             
             await message.reply_text(ai_response, quote=True)
-            logger.info(f"✅ ИИ-ответ пользователю {user_name}")
+            logger.info(f"✅ DeepSeek-ответ пользователю {user_name}")
             
         except asyncio.TimeoutError:
             await message.reply_text("Запрос занял слишком много времени. Попробуй покороче.")
@@ -202,7 +216,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3. Если в сообщении упоминают бота
     if "сиси" in text_lower or "бот" in text_lower:
-        responses = ["Что?", "Ну?", "Чего тебе?"]
+        responses = ["Что?", "Ну?", "Чего тебе?", "Я слушаю...", "Опять ты?"]
         await message.reply_text(random.choice(responses), quote=True)
 
 async def delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,7 +260,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = message.from_user.id
     user_name = message.from_user.first_name or "Неизвестный"
     
-    ai_status = "✅ Активен" if openai_available else "❌ Не активен"
+    ai_status = "✅ DeepSeek AI" if deepseek_available else "❌ Не активен"
     is_admin = "✅ Да" if is_allowed_user(user_id) else "❌ Нет"
     
     response_text = (
@@ -255,7 +269,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Доступные команды:\n"
         "• /start - эта информация\n"
         "• /info - информация о боте\n"
-        "• /help - помощь\n\n"
+        "• /help - помощь\n"
+        "• /ai_status - статус ИИ\n\n"
         "🗣️ Автоответы на:\n"
         "• правила, привет, бот, сиси, луми, создатель\n"
         "• сиси как дела, сиси что делаешь\n"
@@ -280,18 +295,21 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = message.from_user.id if message else 0
     
+    ai_provider = "DeepSeek" if deepseek_available else "Не активен"
+    ai_model = "deepseek-chat" if deepseek_available else "—"
+    
     info_text = (
         "🤖 **Информация о боте Сиси**\n\n"
-        f"**Версия:** 2.0 (AI Edition)\n"
-        f"**ИИ-статус:** {'✅ Активен' if openai_available else '❌ Не активен'}\n"
-        f"**Модель:** GPT-3.5-turbo\n"
+        f"**Версия:** 2.1 (DeepSeek Edition)\n"
+        f"**ИИ-провайдер:** {ai_provider}\n"
+        f"**Модель ИИ:** {ai_model}\n"
         f"**Админов:** {len(ALLOWED_USER_IDS)}\n"
         f"**Триггер ИИ:** '{AI_TRIGGER_PHRASE}'\n"
         f"**Ваш ID:** {user_id}\n"
         f"**Вы админ:** {'✅ Да' if is_allowed_user(user_id) else '❌ Нет'}\n\n"
         "**Создатель:** @lumi\n"
         "**Хостинг:** Railway\n"
-        "**ИИ:** OpenAI API"
+        f"**ИИ:** {ai_provider} API"
     )
     
     try:
@@ -300,13 +318,43 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка отправки /info: {e}")
 
+async def ai_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /ai_status - проверка статуса ИИ"""
+    message = update.message
+    
+    if deepseek_available:
+        status_text = (
+            "🧠 **Статус DeepSeek AI:** ✅ АКТИВЕН\n\n"
+            "• Модель: deepseek-chat\n"
+            "• Триггер: 'сиси, '\n"
+            "• Провайдер: DeepSeek API\n"
+            "• Русский язык: поддерживается\n"
+            "• Бесплатные лимиты: есть\n\n"
+            f"ℹ️ Начни сообщение с '{AI_TRIGGER_PHRASE}' для общения с ИИ"
+        )
+    else:
+        status_text = (
+            "🧠 **Статус ИИ:** ❌ НЕ АКТИВЕН\n\n"
+            "• Причина: нет API ключа DeepSeek\n"
+            "• Решение: добавь DEEPSEEK_API_KEY в Railway\n"
+            "• Автоответы: продолжают работать\n\n"
+            "ℹ️ Получить ключ: platform.deepseek.com"
+        )
+    
+    try:
+        await message.reply_text(status_text, parse_mode='Markdown')
+        logger.info(f"✅ Команда /ai_status от пользователя {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки /ai_status: {e}")
+
 # ===================== ОБРАБОТЧИК ОШИБОК =====================
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
-    logger.error(f"Ошибка в обработчике: {context.error}")
+    error_msg = str(context.error)
+    logger.error(f"Ошибка в обработчике: {error_msg}")
     
     # Если это конфликт (два бота запущены)
-    if "Conflict" in str(context.error) or "terminated by other getUpdates" in str(context.error):
+    if "Conflict" in error_msg or "terminated by other getUpdates" in error_msg:
         logger.error("⚠️ Обнаружен конфликт! Другой экземпляр бота запущен.")
         logger.error("⚠️ Подожду 60 секунд перед перезапуском...")
         await asyncio.sleep(60)
@@ -318,7 +366,7 @@ def main():
     import telegram.error
     
     print("=" * 60)
-    print("🤖 БОТ 'СИСИ AI' ЗАПУСКАЕТСЯ...")
+    print("🤖 БОТ 'СИСИ AI' (DEEPSEEK) ЗАПУСКАЕТСЯ...")
     print("=" * 60)
     
     # Проверка токена
@@ -332,10 +380,14 @@ def main():
     print(f"📦 Загружено {len(RESPONSES)} автоответов")
     print(f"👤 Админов: {len(ALLOWED_USER_IDS)}")
     
-    if openai_available:
-        print(f"🧠 ИИ активирован. Триггер: '{AI_TRIGGER_PHRASE}'")
+    if deepseek_available:
+        print(f"🧠 DeepSeek AI активирован. Триггер: '{AI_TRIGGER_PHRASE}'")
+        print("🌐 API Endpoint: https://api.deepseek.com")
+        print("🤖 Модель: deepseek-chat")
     else:
-        print("⚠️ ИИ не активирован (нет OPENAI_API_KEY)")
+        print("⚠️ DeepSeek AI не активирован (нет DEEPSEEK_API_KEY)")
+        print("ℹ️ Получить ключ: platform.deepseek.com → API Keys")
+        print("ℹ️ Автоответы будут работать без ИИ")
     
     if 7416252489 in ALLOWED_USER_IDS:
         print("⚠️ ВНИМАНИЕ: ID 7416252489 нужно заменить на свой реальный ID!")
@@ -346,14 +398,20 @@ def main():
     
     # Основной цикл
     restart_count = 0
-    max_restarts = 5
+    max_restarts = 3
     
     while restart_count < max_restarts:
         try:
             print(f"\n🚀 Попытка запуска #{restart_count + 1}")
             
             # Создаём новое приложение
-            app = Application.builder().token(TELEGRAM_TOKEN).build()
+            app = Application.builder()\
+                .token(TELEGRAM_TOKEN)\
+                .get_updates_read_timeout(30)\
+                .get_updates_write_timeout(30)\
+                .get_updates_connect_timeout(30)\
+                .get_updates_pool_timeout(30)\
+                .build()
             
             # Регистрируем обработчик ошибок
             app.add_error_handler(error_handler)
@@ -362,6 +420,7 @@ def main():
             app.add_handler(CommandHandler("start", start_command))
             app.add_handler(CommandHandler("help", help_command))
             app.add_handler(CommandHandler("info", info_command))
+            app.add_handler(CommandHandler("ai_status", ai_status_command))
             
             # Команда удаления
             app.add_handler(MessageHandler(
@@ -378,29 +437,31 @@ def main():
             print("✅ Все обработчики зарегистрированы")
             print("🔥 БОТ ЗАПУЩЕН И РАБОТАЕТ!")
             print("=" * 60)
-            print("📱 Отправь /start боту в Telegram")
+            print("📱 Отправь команды боту:")
+            print("• /start - информация")
+            print("• /ai_status - статус DeepSeek")
+            print(f"• 'сиси, привет' - тест ИИ")
             print("=" * 60)
             
-            # Запускаем бота
+            # Запускаем бота без устаревших параметров
             app.run_polling(
                 drop_pending_updates=True,
                 close_loop=False,
-                pool_timeout=20,
-                connect_timeout=30
+                allowed_updates=Update.ALL_TYPES
             )
             
         except telegram.error.Conflict as e:
             print(f"\n⚠️ КОНФЛИКТ: {e}")
             print("ℹ️ Другой экземпляр бота уже запущен!")
-            print("🔄 Ожидаю 30 секунд перед следующей попыткой...")
+            print(f"🔄 Ожидаю {30 * (restart_count + 1)} секунд...")
             restart_count += 1
-            time.sleep(30)
+            time.sleep(30 * restart_count)
             
         except Exception as e:
-            print(f"\n💥 Ошибка: {type(e).__name__}: {e}")
-            print(f"🔄 Перезапуск через 10 секунд...")
+            print(f"\n💥 Ошибка: {type(e).__name__}: {str(e)[:100]}")
+            print(f"🔄 Перезапуск через 15 секунд...")
             restart_count += 1
-            time.sleep(10)
+            time.sleep(15)
     
     print(f"\n❌ Достигнут лимит перезапусков ({max_restarts})")
     print("=" * 60)
